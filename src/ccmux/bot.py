@@ -1,6 +1,7 @@
 """Telegram bot handlers for Claude Code session monitoring."""
 
 import logging
+from pathlib import Path
 
 from telegram import (
     Bot,
@@ -37,6 +38,13 @@ CB_SELECT = "sel:"
 CB_REFRESH = "refresh"
 CB_INLINE_PAGE = "ipage:"
 
+# Directory browser callback prefixes
+CB_DIR_SELECT = "db:sel:"    # Select subdirectory
+CB_DIR_UP = "db:up"          # Go to parent directory
+CB_DIR_CONFIRM = "db:confirm"  # Confirm selection
+CB_DIR_CANCEL = "db:cancel"   # Cancel
+CB_DIR_PAGE = "db:page:"      # Pagination
+
 # Reply keyboard buttons
 BTN_NEW = "➕ New"
 BTN_PREV = "⬅️"
@@ -45,10 +53,16 @@ BTN_NEXT = "➡️"
 # Sessions per page in bottom menu
 MENU_SESSIONS_PER_PAGE = 3
 
+# Directories per page in directory browser
+DIRS_PER_PAGE = 6
+
 # User state keys
 STATE_KEY = "state"
-STATE_WAITING_DIRECTORY = "waiting_directory"
+STATE_BROWSING_DIRECTORY = "browsing_directory"
+BROWSE_PATH_KEY = "browse_path"
+BROWSE_PAGE_KEY = "browse_page"
 PAGE_KEY = "menu_page"
+ACTIVE_WINDOW_CWD_KEY = "active_window_cwd"  # For windows without a session yet
 
 
 def is_user_allowed(user_id: int | None) -> bool:
@@ -155,6 +169,82 @@ def set_user_page(context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
         context.user_data[PAGE_KEY] = page
 
 
+def build_directory_browser(
+    current_path: str,
+    page: int = 0
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build directory browser message and keyboard.
+
+    Returns:
+        (message text, InlineKeyboardMarkup)
+    """
+    path = Path(current_path).expanduser().resolve()
+
+    # Check if path exists and is a directory
+    if not path.exists() or not path.is_dir():
+        # Fall back to browse root dir
+        path = config.browse_root_dir
+
+    # Get subdirectory list (excluding hidden directories)
+    try:
+        subdirs = sorted([
+            d.name for d in path.iterdir()
+            if d.is_dir() and not d.name.startswith('.')
+        ])
+    except (PermissionError, OSError):
+        subdirs = []
+
+    # Pagination calculation
+    total_pages = max(1, (len(subdirs) + DIRS_PER_PAGE - 1) // DIRS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * DIRS_PER_PAGE
+    page_dirs = subdirs[start:start + DIRS_PER_PAGE]
+
+    # Build keyboard
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    # Subdirectory buttons (2 per row)
+    for i in range(0, len(page_dirs), 2):
+        row = []
+        for name in page_dirs[i:i+2]:
+            # Truncate long directory names
+            display = name[:12] + "…" if len(name) > 13 else name
+            row.append(InlineKeyboardButton(
+                f"📁 {display}",
+                callback_data=f"{CB_DIR_SELECT}{name}"
+            ))
+        buttons.append(row)
+
+    # Pagination buttons (if needed)
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀", callback_data=f"{CB_DIR_PAGE}{page-1}"))
+        nav.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("▶", callback_data=f"{CB_DIR_PAGE}{page+1}"))
+        buttons.append(nav)
+
+    # Action buttons
+    action_row: list[InlineKeyboardButton] = []
+    # Only show "Go up" if not at browse root (and not at filesystem root)
+    browse_root = config.browse_root_dir.resolve()
+    if path != path.parent and path != browse_root:
+        action_row.append(InlineKeyboardButton("Up", callback_data=CB_DIR_UP))
+    action_row.append(InlineKeyboardButton("Select", callback_data=CB_DIR_CONFIRM))
+    action_row.append(InlineKeyboardButton("Cancel", callback_data=CB_DIR_CANCEL))
+    buttons.append(action_row)
+
+    # Build message
+    display_path = str(path).replace(str(Path.home()), "~")
+    if not subdirs:
+        text = f"*Select Working Directory*\n\nCurrent: `{display_path}`\n\n_(No subdirectories)_"
+    else:
+        text = f"*Select Working Directory*\n\nCurrent: `{display_path}`\n\nTap a folder to enter, or select current directory"
+
+    return text, InlineKeyboardMarkup(buttons)
+
+
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
     """Send or update the main menu."""
     page = get_user_page(context)
@@ -198,6 +288,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Clear any pending state
     if context.user_data:
         context.user_data.pop(STATE_KEY, None)
+        context.user_data.pop(BROWSE_PATH_KEY, None)
+        context.user_data.pop(BROWSE_PAGE_KEY, None)
 
     set_user_page(context, 0)
     await send_main_menu(update, context, user.id)
@@ -242,22 +334,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = update.message.text
     page = get_user_page(context)
 
-    # Handle waiting for directory input
-    if context.user_data and context.user_data.get(STATE_KEY) == STATE_WAITING_DIRECTORY:
-        context.user_data.pop(STATE_KEY, None)
-
-        if text.startswith("/"):
-            await update.message.reply_text(
-                "Cancelled.",
-                reply_markup=build_reply_keyboard(user.id, page),
-            )
-            return
-
-        # Create new window
-        success, message = tmux_manager.create_window(text)
+    # Ignore text when in directory browsing mode (user should use inline buttons)
+    if context.user_data and context.user_data.get(STATE_KEY) == STATE_BROWSING_DIRECTORY:
         await update.message.reply_text(
-            f"{'✅' if success else '❌'} {message}",
-            reply_markup=build_reply_keyboard(user.id, page),
+            "Please use the directory browser above to select a directory, or tap Cancel to exit."
         )
         return
 
@@ -284,14 +364,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if text.strip() == "":
         return
 
-    # Handle New button
+    # Handle New button - start directory browser
     if text == BTN_NEW:
+        start_path = str(config.browse_root_dir)
         if context.user_data is not None:
-            context.user_data[STATE_KEY] = STATE_WAITING_DIRECTORY
+            context.user_data[STATE_KEY] = STATE_BROWSING_DIRECTORY
+            context.user_data[BROWSE_PATH_KEY] = start_path
+            context.user_data[BROWSE_PAGE_KEY] = 0
+
+        msg_text, keyboard = build_directory_browser(start_path)
         await update.message.reply_text(
-            "Enter the directory path for the new Claude Code session:\n"
-            "(e.g., ~/Code/my-project)\n\n"
-            "Send /cancel to abort."
+            msg_text,
+            reply_markup=keyboard,
+            parse_mode="Markdown",
         )
         return
 
@@ -300,8 +385,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for session in sessions:
         # Match by project name in the button text
         if f"[{session.project_name}]" in text:
-            # Select this session
+            # Select this session and clear any pending window cwd
             session_manager.set_active_session(user.id, session.session_id)
+            if context.user_data is not None:
+                context.user_data.pop(ACTIVE_WINDOW_CWD_KEY, None)
             is_subscribed = session_manager.is_subscribed(user.id, session.session_id)
 
             sub_status = "🔔 Subscribed" if is_subscribed else "🔕 Not subscribed"
@@ -325,25 +412,51 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
 
-    # Otherwise, try to send to active session
-    success, message = session_manager.send_to_active_session(user.id, text)
+    # Otherwise, try to send to active session or active window
+    active = session_manager.get_active_session(user.id)
 
-    if success:
-        active = session_manager.get_active_session(user.id)
-        if active:
-            await update.message.reply_text(f"📤 Sent to [{active.project_name}]")
-    else:
-        active = session_manager.get_active_session(user.id)
-        if not active:
+    if active:
+        # Check if the session has an active terminal before trying to send
+        if not session_manager.has_active_terminal(active):
             await update.message.reply_text(
-                "❌ No active session selected.\n"
-                "Tap a session button to select it first."
+                f"❌ Session [{active.project_name}] has no active terminal.\n"
+                "The tmux window may have been closed or the directory changed.\n"
+                "Select a different session or create a new one with New."
             )
+            return
+
+        success, message = session_manager.send_to_active_session(user.id, text)
+
+        if success:
+            await update.message.reply_text(f"📤 Sent to [{active.project_name}]")
+        else:
+            await update.message.reply_text(f"❌ {message}")
+        return
+
+    # No active session - check for active window cwd (newly created window)
+    active_cwd = context.user_data.get(ACTIVE_WINDOW_CWD_KEY) if context.user_data else None
+
+    if active_cwd:
+        # Try to send directly to the tmux window by cwd
+        success = tmux_manager.send_keys_by_cwd(active_cwd, text)
+        if success:
+            project_name = Path(active_cwd).name
+            await update.message.reply_text(f"📤 Sent to [{project_name}]")
         else:
             await update.message.reply_text(
-                f"❌ {message}\n"
-                f"Session [{active.project_name}] may have no active terminal."
+                "❌ Window not found. It may have been closed.\n"
+                "Create a new window with New."
             )
+            # Clear the stale cwd
+            if context.user_data is not None:
+                context.user_data.pop(ACTIVE_WINDOW_CWD_KEY, None)
+        return
+
+    # No active session and no active window
+    await update.message.reply_text(
+        "❌ No active session selected.\n"
+        "Tap a session button to select it, or create a new one with New."
+    )
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -388,6 +501,107 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif data == CB_REFRESH:
         await query.answer("Refreshed")
         await query.delete_message()
+
+    # Directory browser: select subdirectory
+    elif data.startswith(CB_DIR_SELECT):
+        subdir_name = data[len(CB_DIR_SELECT):]
+        default_path = str(config.browse_root_dir)
+        current_path = context.user_data.get(BROWSE_PATH_KEY, default_path) if context.user_data else default_path
+        new_path = Path(current_path) / subdir_name
+
+        # Validate the new path exists
+        if not new_path.exists() or not new_path.is_dir():
+            await query.answer("Directory not found", show_alert=True)
+            return
+
+        new_path_str = str(new_path)
+        if context.user_data is not None:
+            context.user_data[BROWSE_PATH_KEY] = new_path_str
+            context.user_data[BROWSE_PAGE_KEY] = 0
+
+        msg_text, keyboard = build_directory_browser(new_path_str)
+        await query.edit_message_text(msg_text, reply_markup=keyboard, parse_mode="Markdown")
+        await query.answer()
+
+    # Directory browser: go to parent directory
+    elif data == CB_DIR_UP:
+        default_path = str(config.browse_root_dir)
+        current_path = context.user_data.get(BROWSE_PATH_KEY, default_path) if context.user_data else default_path
+        current = Path(current_path).resolve()
+        parent = current.parent
+
+        # Don't go above browse root
+        root = config.browse_root_dir.resolve()
+        if not str(parent).startswith(str(root)) and parent != root:
+            parent = root
+
+        parent_path = str(parent)
+        if context.user_data is not None:
+            context.user_data[BROWSE_PATH_KEY] = parent_path
+            context.user_data[BROWSE_PAGE_KEY] = 0
+
+        msg_text, keyboard = build_directory_browser(parent_path)
+        await query.edit_message_text(msg_text, reply_markup=keyboard, parse_mode="Markdown")
+        await query.answer()
+
+    # Directory browser: pagination
+    elif data.startswith(CB_DIR_PAGE):
+        page = int(data[len(CB_DIR_PAGE):])
+        default_path = str(config.browse_root_dir)
+        current_path = context.user_data.get(BROWSE_PATH_KEY, default_path) if context.user_data else default_path
+        if context.user_data is not None:
+            context.user_data[BROWSE_PAGE_KEY] = page
+
+        msg_text, keyboard = build_directory_browser(current_path, page)
+        await query.edit_message_text(msg_text, reply_markup=keyboard, parse_mode="Markdown")
+        await query.answer()
+
+    # Directory browser: confirm selection
+    elif data == CB_DIR_CONFIRM:
+        default_path = str(config.browse_root_dir)
+        selected_path = context.user_data.get(BROWSE_PATH_KEY, default_path) if context.user_data else default_path
+
+        # Clear browsing state
+        if context.user_data is not None:
+            context.user_data.pop(STATE_KEY, None)
+            context.user_data.pop(BROWSE_PATH_KEY, None)
+            context.user_data.pop(BROWSE_PAGE_KEY, None)
+
+        # Create new window
+        success, message = tmux_manager.create_window(selected_path)
+
+        if success:
+            # Clear active session and set active window cwd for direct messaging
+            session_manager.clear_active_session(user.id)
+            if context.user_data is not None:
+                # Store the resolved path for the new window
+                resolved_path = str(Path(selected_path).expanduser().resolve())
+                context.user_data[ACTIVE_WINDOW_CWD_KEY] = resolved_path
+            await query.edit_message_text(
+                f"✅ {message}\n\n"
+                "_You can now send messages directly to this window._",
+                parse_mode="Markdown",
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ {message}",
+                parse_mode="Markdown",
+            )
+        await query.answer("Created" if success else "Failed")
+
+    # Directory browser: cancel
+    elif data == CB_DIR_CANCEL:
+        if context.user_data is not None:
+            context.user_data.pop(STATE_KEY, None)
+            context.user_data.pop(BROWSE_PATH_KEY, None)
+            context.user_data.pop(BROWSE_PAGE_KEY, None)
+
+        await query.edit_message_text("Cancelled")
+        await query.answer("Cancelled")
+
+    # No-op for pagination indicator
+    elif data == "noop":
+        await query.answer()
 
 
 async def send_notification(bot: Bot, user_id: int, session: ClaudeSession, text: str) -> None:
@@ -467,6 +681,8 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if context.user_data:
         context.user_data.pop(STATE_KEY, None)
+        context.user_data.pop(BROWSE_PATH_KEY, None)
+        context.user_data.pop(BROWSE_PAGE_KEY, None)
 
     page = get_user_page(context)
     if update.message:

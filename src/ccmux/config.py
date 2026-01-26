@@ -26,6 +26,13 @@ class Config:
         # Tmux session name
         self.tmux_session_name = os.getenv("TMUX_SESSION_NAME", "ccmux")
 
+        # Claude command to run in new windows
+        self.claude_command = os.getenv("CLAUDE_COMMAND", "claude --dangerously-skip-permissions")
+
+        # Root directory for directory browser (default: current working directory)
+        browse_root = os.getenv("BROWSE_ROOT_DIR", "")
+        self.browse_root_dir = Path(browse_root).resolve() if browse_root else Path.cwd()
+
         # State file for persisting user subscriptions
         self.state_file = Path.home() / ".ccmux" / "state.json"
 

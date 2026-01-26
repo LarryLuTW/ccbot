@@ -222,7 +222,7 @@ class TmuxManager:
             if start_claude:
                 pane = window.active_pane
                 if pane:
-                    pane.send_keys("claude", enter=True)
+                    pane.send_keys(config.claude_command, enter=True)
 
             return True, f"Created window '{window_name}' at {path}"
 
