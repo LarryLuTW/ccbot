@@ -33,7 +33,7 @@ from .screenshot import text_to_image
 from .session import session_manager
 from .session_monitor import NewMessage, SessionMonitor
 from .telegram_sender import split_message
-from .terminal_parser import extract_ask_question_content, is_ask_question_ui
+from .terminal_parser import extract_interactive_content, is_interactive_ui, parse_status_line
 from .tmux_manager import tmux_manager
 
 logger = logging.getLogger(__name__)
@@ -55,10 +55,6 @@ _tool_msg_ids: dict[tuple[str, int], int] = {}
 # Status message tracking: user_id -> (message_id, window_name, last_text)
 # Note: last_text may be missing in old entries during rolling update
 _status_msg_info: dict[int, tuple[int, str] | tuple[int, str, str]] = {}
-
-# Claude Code spinner characters that indicate status line
-STATUS_SPINNERS = frozenset(["·", "✻", "✽", "✶", "✳", "✢"])
-
 
 async def _rate_limit_send(user_id: int) -> None:
     """Wait if necessary to avoid Telegram flood control (max 1 msg/sec per user)."""
@@ -179,6 +175,9 @@ async def _merge_content_tasks(
         # Put remaining items back into the queue
         for item in remaining:
             queue.put_nowait(item)
+            # Compensate: this item was already counted when first enqueued,
+            # put_nowait adds a duplicate count that must be removed
+            queue.task_done()
 
     if merge_count == 0:
         return first, 0
@@ -444,6 +443,10 @@ async def _do_clear_status_message(bot: Bot, user_id: int) -> None:
 
 async def _check_and_send_status(bot: Bot, user_id: int, window_name: str) -> None:
     """Check terminal for status line and send status message if present."""
+    # Skip if there are more messages pending in the queue
+    queue = _message_queues.get(user_id)
+    if queue and not queue.empty():
+        return
     w = await tmux_manager.find_window_by_name(window_name)
     if not w:
         return
@@ -452,7 +455,7 @@ async def _check_and_send_status(bot: Bot, user_id: int, window_name: str) -> No
     if not pane_text:
         return
 
-    status_line = _parse_status_line(pane_text)
+    status_line = parse_status_line(pane_text)
     if status_line:
         await _do_send_status_message(bot, user_id, window_name, status_line)
 
@@ -475,7 +478,7 @@ CB_SESSION_KILL = "sa:kill:"
 # Screenshot callback prefix
 CB_SCREENSHOT_REFRESH = "ss:ref:"
 
-# AskUserQuestion callback prefixes
+# Interactive UI callback prefixes (aq: prefix kept for backward compatibility)
 CB_ASK_UP = "aq:up:"       # aq:up:<window>
 CB_ASK_DOWN = "aq:down:"   # aq:down:<window>
 CB_ASK_LEFT = "aq:left:"   # aq:left:<window>
@@ -484,8 +487,11 @@ CB_ASK_ESC = "aq:esc:"     # aq:esc:<window>
 CB_ASK_ENTER = "aq:enter:" # aq:enter:<window>
 CB_ASK_REFRESH = "aq:ref:" # aq:ref:<window>
 
-# Track AskUserQuestion message IDs: user_id -> message_id
-_ask_question_msgs: dict[int, int] = {}
+# Track interactive UI message IDs: user_id -> message_id
+_interactive_msgs: dict[int, int] = {}
+
+# Tool names that trigger interactive UI via JSONL (terminal capture + inline keyboard)
+INTERACTIVE_TOOL_NAMES = frozenset({"AskUserQuestion", "ExitPlanMode"})
 
 # Track interactive mode: user_id -> window_name (None if not in interactive mode)
 _interactive_mode: dict[int, str] = {}
@@ -897,7 +903,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         interactive_window = _get_interactive_window(user.id)
         if interactive_window and interactive_window == active_wname:
             await asyncio.sleep(0.2)  # Wait for terminal to update
-            await _handle_ask_question_ui(context.bot, user.id, active_wname)
+            await _handle_interactive_ui(context.bot, user.id, active_wname)
         return
 
     await _safe_reply(
@@ -1192,98 +1198,74 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif data == "noop":
         await query.answer()
 
-    # AskUserQuestion: Up arrow
+    # Interactive UI: Up arrow
     elif data.startswith(CB_ASK_UP):
         window_name = data[len(CB_ASK_UP):]
         w = await tmux_manager.find_window_by_name(window_name)
         if w:
             await tmux_manager.send_keys(w.window_id, "Up", enter=False, literal=False)
             await asyncio.sleep(0.15)
-            await _handle_ask_question_ui(context.bot, user.id, window_name)
+            await _handle_interactive_ui(context.bot, user.id, window_name)
         await query.answer()
 
-    # AskUserQuestion: Down arrow
+    # Interactive UI: Down arrow
     elif data.startswith(CB_ASK_DOWN):
         window_name = data[len(CB_ASK_DOWN):]
         w = await tmux_manager.find_window_by_name(window_name)
         if w:
             await tmux_manager.send_keys(w.window_id, "Down", enter=False, literal=False)
             await asyncio.sleep(0.15)
-            await _handle_ask_question_ui(context.bot, user.id, window_name)
+            await _handle_interactive_ui(context.bot, user.id, window_name)
         await query.answer()
 
-    # AskUserQuestion: Left arrow
+    # Interactive UI: Left arrow
     elif data.startswith(CB_ASK_LEFT):
         window_name = data[len(CB_ASK_LEFT):]
         w = await tmux_manager.find_window_by_name(window_name)
         if w:
             await tmux_manager.send_keys(w.window_id, "Left", enter=False, literal=False)
             await asyncio.sleep(0.15)
-            await _handle_ask_question_ui(context.bot, user.id, window_name)
+            await _handle_interactive_ui(context.bot, user.id, window_name)
         await query.answer()
 
-    # AskUserQuestion: Right arrow
+    # Interactive UI: Right arrow
     elif data.startswith(CB_ASK_RIGHT):
         window_name = data[len(CB_ASK_RIGHT):]
         w = await tmux_manager.find_window_by_name(window_name)
         if w:
             await tmux_manager.send_keys(w.window_id, "Right", enter=False, literal=False)
             await asyncio.sleep(0.15)
-            await _handle_ask_question_ui(context.bot, user.id, window_name)
+            await _handle_interactive_ui(context.bot, user.id, window_name)
         await query.answer()
 
-    # AskUserQuestion: Escape
+    # Interactive UI: Escape
     elif data.startswith(CB_ASK_ESC):
         window_name = data[len(CB_ASK_ESC):]
         w = await tmux_manager.find_window_by_name(window_name)
         if w:
             await tmux_manager.send_keys(w.window_id, "Escape", enter=False, literal=False)
-            await _clear_ask_question_msg(user.id)
+            await _clear_interactive_msg(user.id, context.bot)
         await query.answer("⎋ Esc")
 
-    # AskUserQuestion: Enter
+    # Interactive UI: Enter
     elif data.startswith(CB_ASK_ENTER):
         window_name = data[len(CB_ASK_ENTER):]
         w = await tmux_manager.find_window_by_name(window_name)
         if w:
             await tmux_manager.send_keys(w.window_id, "Enter", enter=False, literal=False)
             await asyncio.sleep(0.15)
-            await _handle_ask_question_ui(context.bot, user.id, window_name)
+            await _handle_interactive_ui(context.bot, user.id, window_name)
         await query.answer("⏎ Enter")
 
-    # AskUserQuestion: refresh display
+    # Interactive UI: refresh display
     elif data.startswith(CB_ASK_REFRESH):
         window_name = data[len(CB_ASK_REFRESH):]
-        await _handle_ask_question_ui(context.bot, user.id, window_name)
+        await _handle_interactive_ui(context.bot, user.id, window_name)
         await query.answer("🔄")
 
 
 # --- Status line polling ---
 
-
-def _parse_status_line(pane_text: str) -> str | None:
-    """Extract the Claude Code status line from terminal output.
-
-    Returns the status text if found, None otherwise.
-    Status lines start with spinner characters: · ✻ ✽ ✶ ✳ ✢
-    The spinner character is trimmed from the returned text.
-    """
-    if not pane_text:
-        return None
-
-    # Search from bottom up - status line can be anywhere in last ~15 lines
-    # (there may be separator lines, prompts, etc. below it)
-    lines = pane_text.strip().split("\n")
-    for line in reversed(lines[-15:]):
-        line = line.strip()
-        if not line:
-            continue
-        # Check if line starts with a spinner character
-        first_char = line[0] if line else ""
-        if first_char in STATUS_SPINNERS:
-            # Remove the spinner character and return the rest
-            return line[1:].strip()
-    return None
 
 
 async def _enqueue_status_update(bot: Bot, user_id: int, window_name: str, status_text: str | None) -> None:
@@ -1303,7 +1285,11 @@ async def _enqueue_status_update(bot: Bot, user_id: int, window_name: str, statu
 
 
 async def _update_status_message(bot: Bot, user_id: int, window_name: str) -> None:
-    """Poll terminal and enqueue status update for user's active window."""
+    """Poll terminal and enqueue status update for user's active window.
+
+    Also detects permission prompt UIs (not triggered via JSONL) and enters
+    interactive mode when found.
+    """
     w = await tmux_manager.find_window_by_name(window_name)
     if not w:
         # Window gone, enqueue clear
@@ -1315,7 +1301,30 @@ async def _update_status_message(bot: Bot, user_id: int, window_name: str) -> No
         # Transient capture failure - keep existing status message
         return
 
-    status_line = _parse_status_line(pane_text)
+    interactive_window = _get_interactive_window(user_id)
+    should_check_new_ui = True
+
+    if interactive_window == window_name:
+        # User is in interactive mode for THIS window
+        if is_interactive_ui(pane_text):
+            # Interactive UI still showing — skip status update (user is interacting)
+            return
+        # Interactive UI gone — clear interactive mode, fall through to status check.
+        # Don't re-check for new UI this cycle (the old one just disappeared).
+        await _clear_interactive_msg(user_id, bot)
+        should_check_new_ui = False
+    elif interactive_window is not None:
+        # User is in interactive mode for a DIFFERENT window (window switched)
+        # Clear stale interactive mode
+        await _clear_interactive_msg(user_id, bot)
+
+    # Check for permission prompt (interactive UI not triggered via JSONL)
+    if should_check_new_ui and is_interactive_ui(pane_text):
+        await _handle_interactive_ui(bot, user_id, window_name)
+        return
+
+    # Normal status line check
+    status_line = parse_status_line(pane_text)
 
     if status_line:
         await _enqueue_status_update(bot, user_id, window_name, status_line)
@@ -1347,11 +1356,11 @@ async def _enqueue_content_message(
     queue.put_nowait(task)
 
 
-# --- AskUserQuestion handling ---
+# --- Interactive UI handling (AskUserQuestion / ExitPlanMode / Permission Prompt) ---
 
 
-def _build_ask_question_keyboard(window_name: str) -> InlineKeyboardMarkup:
-    """Build keyboard for AskUserQuestion UI navigation."""
+def _build_interactive_keyboard(window_name: str) -> InlineKeyboardMarkup:
+    """Build keyboard for interactive UI navigation."""
     return InlineKeyboardMarkup([
         # Row 1: directional keys
         [
@@ -1371,13 +1380,14 @@ def _build_ask_question_keyboard(window_name: str) -> InlineKeyboardMarkup:
     ])
 
 
-async def _handle_ask_question_ui(
+async def _handle_interactive_ui(
     bot: Bot,
     user_id: int,
     window_name: str,
 ) -> bool:
-    """Capture terminal and send AskUserQuestion UI content to user.
+    """Capture terminal and send interactive UI content to user.
 
+    Handles AskUserQuestion, ExitPlanMode, and Permission Prompt UIs.
     Returns True if UI was detected and sent, False otherwise.
     """
     w = await tmux_manager.find_window_by_name(window_name)
@@ -1389,23 +1399,23 @@ async def _handle_ask_question_ui(
     if not pane_text:
         return False
 
-    # Quick check if it looks like AskUserQuestion UI
-    if not is_ask_question_ui(pane_text):
+    # Quick check if it looks like an interactive UI
+    if not is_interactive_ui(pane_text):
         return False
 
     # Extract content between separators
-    content = extract_ask_question_content(pane_text)
+    content = extract_interactive_content(pane_text)
     if not content:
         return False
 
     # Build message with navigation keyboard
-    keyboard = _build_ask_question_keyboard(window_name)
+    keyboard = _build_interactive_keyboard(window_name)
 
     # Send as plain text (no markdown conversion)
     text = content.content
 
-    # Check if we have an existing AskQuestion message to edit
-    existing_msg_id = _ask_question_msgs.get(user_id)
+    # Check if we have an existing interactive message to edit
+    existing_msg_id = _interactive_msgs.get(user_id)
     if existing_msg_id:
         try:
             await bot.edit_message_text(
@@ -1428,19 +1438,24 @@ async def _handle_ask_question_ui(
             text=text,
             reply_markup=keyboard,
         )
-        _ask_question_msgs[user_id] = sent.message_id
+        _interactive_msgs[user_id] = sent.message_id
         _interactive_mode[user_id] = window_name
     except Exception as e:
-        logger.error(f"Failed to send AskQuestion UI to {user_id}: {e}")
+        logger.error(f"Failed to send interactive UI to {user_id}: {e}")
         return False
 
     return True
 
 
-async def _clear_ask_question_msg(user_id: int) -> None:
-    """Clear tracked AskQuestion message and exit interactive mode."""
-    _ask_question_msgs.pop(user_id, None)
+async def _clear_interactive_msg(user_id: int, bot: Bot | None = None) -> None:
+    """Clear tracked interactive message, delete from chat, and exit interactive mode."""
+    msg_id = _interactive_msgs.pop(user_id, None)
     _interactive_mode.pop(user_id, None)
+    if bot and msg_id:
+        try:
+            await bot.delete_message(chat_id=user_id, message_id=msg_id)
+        except Exception:
+            pass  # Message may already be deleted or too old
 
 
 def _get_interactive_window(user_id: int) -> str | None:
@@ -1561,11 +1576,17 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         return
 
     for user_id, wname in active_users:
-        # Handle AskUserQuestion tool specially - capture terminal and send UI
-        if msg.tool_name == "AskUserQuestion" and msg.content_type == "tool_use":
+        # Handle interactive tools specially - capture terminal and send UI
+        if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
+            # Mark interactive mode BEFORE sleeping so polling skips this window
+            _interactive_mode[user_id] = wname
+            # Flush pending messages (e.g. plan content) before sending interactive UI
+            queue = _message_queues.get(user_id)
+            if queue:
+                await queue.join()
             # Wait briefly for Claude Code to render the question UI
             await asyncio.sleep(0.3)
-            handled = await _handle_ask_question_ui(bot, user_id, wname)
+            handled = await _handle_interactive_ui(bot, user_id, wname)
             if handled:
                 # Update user's read offset
                 session = await session_manager.resolve_session_for_window(wname)
@@ -1576,17 +1597,19 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                     except OSError:
                         pass
                 continue  # Don't send the normal tool_use message
+            else:
+                # UI not rendered — clear the early-set mode
+                _interactive_mode.pop(user_id, None)
+
+        # Any non-interactive message means the interaction is complete — delete the UI message
+        if _interactive_msgs.get(user_id):
+            await _clear_interactive_msg(user_id, bot)
 
         parts = _build_response_parts(
             wname, msg.text, msg.is_complete, msg.content_type, msg.role,
         )
 
         if msg.is_complete:
-            # Clear AskQuestion message tracking when we get a non-AskUserQuestion message
-            # (the question UI was answered or cancelled)
-            if msg.tool_name != "AskUserQuestion":
-                await _clear_ask_question_msg(user_id)
-
             # Enqueue content message task
             # Note: tool_result editing is handled inside _process_content_task
             # to ensure sequential processing with tool_use message sending
@@ -1623,6 +1646,10 @@ async def _status_poll_loop(bot: Bot) -> None:
             # Get all users with active sessions
             for user_id, wname in list(session_manager.active_sessions.items()):
                 try:
+                    # Skip terminal polling while content messages are pending
+                    queue = _message_queues.get(user_id)
+                    if queue and not queue.empty():
+                        continue
                     await _update_status_message(bot, user_id, wname)
                 except Exception as e:
                     logger.debug(f"Status update error for user {user_id}: {e}")

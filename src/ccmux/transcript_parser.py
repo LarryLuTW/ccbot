@@ -195,6 +195,8 @@ class TranscriptParser:
                 q = questions[0]
                 if isinstance(q, dict):
                     summary = q.get("question", "")
+        elif name == "ExitPlanMode":
+            summary = ""
         elif name == "Skill":
             summary = input_data.get("skill", "")
         else:
@@ -545,6 +547,15 @@ class TranscriptParser:
                         name = block.get("name", "unknown")
                         inp = block.get("input", {})
                         summary = cls.format_tool_use_summary(name, inp)
+
+                        # ExitPlanMode: emit plan content as text before tool_use entry
+                        if name == "ExitPlanMode" and isinstance(inp, dict):
+                            plan = inp.get("plan", "")
+                            if plan:
+                                result.append(ParsedEntry(
+                                    role="assistant", text=plan, content_type="text",
+                                    timestamp=entry_timestamp,
+                                ))
                         if tool_id:
                             # Store tool info for later tool_result formatting
                             # Edit tool needs input_data to generate diff in tool_result stage
