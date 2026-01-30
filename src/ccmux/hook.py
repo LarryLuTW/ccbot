@@ -7,10 +7,12 @@ This module must NOT import config.py (which requires TELEGRAM_BOT_TOKEN),
 since hooks run inside tmux panes where bot env vars are not set.
 """
 
+import argparse
 import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,10 +21,121 @@ from pathlib import Path
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 _SESSION_MAP_FILE = Path.home() / ".ccmux" / "session_map.json"
+_CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
+
+# The hook command suffix for detection
+_HOOK_COMMAND_SUFFIX = "ccmux hook"
+
+
+def _find_ccmux_path() -> str:
+    """Find the full path to the ccmux executable.
+
+    Priority:
+    1. shutil.which("ccmux") - if ccmux is in PATH
+    2. Same directory as the Python interpreter (for venv installs)
+    """
+    # Try PATH first
+    ccmux_path = shutil.which("ccmux")
+    if ccmux_path:
+        return ccmux_path
+
+    # Fall back to the directory containing the Python interpreter
+    # This handles the case where ccmux is installed in a venv
+    python_dir = Path(sys.executable).parent
+    ccmux_in_venv = python_dir / "ccmux"
+    if ccmux_in_venv.exists():
+        return str(ccmux_in_venv)
+
+    # Last resort: assume it will be in PATH
+    return "ccmux"
+
+
+def _is_hook_installed(settings: dict) -> bool:
+    """Check if ccmux hook is already installed in the settings.
+
+    Detects both 'ccmux hook' and full paths like '/path/to/ccmux hook'.
+    """
+    hooks = settings.get("hooks", {})
+    session_start = hooks.get("SessionStart", [])
+
+    for entry in session_start:
+        if not isinstance(entry, dict):
+            continue
+        inner_hooks = entry.get("hooks", [])
+        for h in inner_hooks:
+            if not isinstance(h, dict):
+                continue
+            cmd = h.get("command", "")
+            # Match 'ccmux hook' or paths ending with 'ccmux hook'
+            if cmd == _HOOK_COMMAND_SUFFIX or cmd.endswith("/" + _HOOK_COMMAND_SUFFIX):
+                return True
+    return False
+
+
+def _install_hook() -> int:
+    """Install the ccmux hook into Claude's settings.json.
+
+    Returns 0 on success, 1 on error.
+    """
+    settings_file = _CLAUDE_SETTINGS_FILE
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Read existing settings
+    settings: dict = {}
+    if settings_file.exists():
+        try:
+            settings = json.loads(settings_file.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Error reading {settings_file}: {e}", file=sys.stderr)
+            return 1
+
+    # Check if already installed
+    if _is_hook_installed(settings):
+        print(f"Hook already installed in {settings_file}")
+        return 0
+
+    # Find the full path to ccmux
+    ccmux_path = _find_ccmux_path()
+    hook_command = f"{ccmux_path} hook"
+    hook_config = {"type": "command", "command": hook_command, "timeout": 5}
+
+    # Install the hook
+    if "hooks" not in settings:
+        settings["hooks"] = {}
+    if "SessionStart" not in settings["hooks"]:
+        settings["hooks"]["SessionStart"] = []
+
+    settings["hooks"]["SessionStart"].append({"hooks": [hook_config]})
+
+    # Write back
+    try:
+        settings_file.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"Error writing {settings_file}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Hook installed successfully in {settings_file}")
+    return 0
 
 
 def hook_main() -> None:
-    """Process a Claude Code hook event from stdin."""
+    """Process a Claude Code hook event from stdin, or install the hook."""
+    parser = argparse.ArgumentParser(
+        prog="ccmux hook",
+        description="Claude Code session tracking hook",
+    )
+    parser.add_argument(
+        "--install",
+        action="store_true",
+        help="Install the hook into ~/.claude/settings.json",
+    )
+    # Parse only known args to avoid conflicts with stdin JSON
+    args, _ = parser.parse_known_args(sys.argv[2:])
+
+    if args.install:
+        sys.exit(_install_hook())
+
+    # Normal hook processing: read JSON from stdin
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
@@ -46,19 +159,19 @@ def hook_main() -> None:
     if event != "SessionStart":
         return
 
-    # Get tmux window name for the pane running this hook.
+    # Get tmux session:window key for the pane running this hook.
     # TMUX_PANE is set by tmux for every process inside a pane.
     pane_id = os.environ.get("TMUX_PANE", "")
     if not pane_id:
         return
 
     result = subprocess.run(
-        ["tmux", "display-message", "-t", pane_id, "-p", "#{window_name}"],
+        ["tmux", "display-message", "-t", pane_id, "-p", "#{session_name}:#{window_name}"],
         capture_output=True,
         text=True,
     )
-    window_name = result.stdout.strip()
-    if not window_name:
+    session_window_key = result.stdout.strip()
+    if not session_window_key or ":" not in session_window_key:
         return
 
     # Read-modify-write with file locking to prevent concurrent hook races
@@ -77,7 +190,7 @@ def hook_main() -> None:
                     except (json.JSONDecodeError, OSError):
                         pass
 
-                session_map[window_name] = {
+                session_map[session_window_key] = {
                     "session_id": session_id,
                     "cwd": cwd,
                 }

@@ -332,14 +332,23 @@ class SessionMonitor:
         return new_messages
 
     async def _load_current_session_map(self) -> dict[str, str]:
-        """Load current session_map and return window_name -> session_id mapping."""
+        """Load current session_map and return window_name -> session_id mapping.
+
+        Keys in session_map are formatted as "tmux_session:window_name".
+        Only entries matching our tmux_session_name are processed.
+        """
         window_to_session: dict[str, str] = {}
         if config.session_map_file.exists():
             try:
                 async with aiofiles.open(config.session_map_file, "r") as f:
                     content = await f.read()
                 session_map = json.loads(content)
-                for window_name, info in session_map.items():
+                prefix = f"{config.tmux_session_name}:"
+                for key, info in session_map.items():
+                    # Only process entries for our tmux session
+                    if not key.startswith(prefix):
+                        continue
+                    window_name = key[len(prefix):]
                     session_id = info.get("session_id", "")
                     if session_id:
                         window_to_session[window_name] = session_id

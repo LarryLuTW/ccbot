@@ -32,7 +32,6 @@ class Config:
         # Tmux session name and window naming
         self.tmux_session_name = os.getenv("TMUX_SESSION_NAME", "ccmux")
         self.tmux_main_window_name = "__main__"
-        self.tmux_window_prefix = "cc:"
 
         # Claude command to run in new windows
         self.claude_command = os.getenv("CLAUDE_COMMAND", "claude")

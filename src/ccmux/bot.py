@@ -49,10 +49,6 @@ STATUS_POLL_INTERVAL = 1.0  # seconds - faster response (rate limiting at send l
 _last_send_time: dict[int, float] = {}
 MESSAGE_SEND_INTERVAL = 1.1  # seconds between messages to same user
 
-# Queue overflow protection
-MAX_QUEUE_SIZE = 5  # Drop middle messages if queue exceeds this
-QUEUE_CHECK_ENABLED = True  # Feature flag
-
 # Map (tool_use_id, user_id) -> telegram message_id for editing tool_use messages with results
 _tool_msg_ids: dict[tuple[str, int], int] = {}
 
@@ -124,121 +120,6 @@ def _inspect_queue(queue: asyncio.Queue[MessageTask]) -> list[MessageTask]:
         except asyncio.QueueEmpty:
             break
     return items
-
-
-def _compact_queue(
-    items: list[MessageTask],
-    max_size: int,
-) -> tuple[list[MessageTask], int]:
-    """Compact queue by removing middle messages.
-
-    Strategy:
-    1. Keep first content message (context)
-    2. Keep last N messages (recency)
-    3. Drop middle content messages
-    4. Deduplicate status (keep only latest per window)
-
-    Returns: (compacted_items, num_dropped)
-    """
-    if len(items) <= max_size:
-        return items, 0
-
-    # Separate by type
-    content_msgs: list[tuple[int, MessageTask]] = []
-    status_msgs: dict[str, tuple[int, MessageTask]] = {}  # window -> (idx, task)
-
-    for i, task in enumerate(items):
-        if task.task_type == "content":
-            content_msgs.append((i, task))
-        elif task.task_type == "status_update":
-            # Keep only latest status per window
-            wname = task.window_name or ""
-            status_msgs[wname] = (i, task)
-
-    # Build compacted list
-    kept: list[tuple[int, MessageTask]] = []
-
-    # Always keep first content (context)
-    if content_msgs:
-        kept.append(content_msgs[0])
-        remaining_content = content_msgs[1:]
-    else:
-        remaining_content = []
-
-    # Keep last N items from remaining
-    remaining_items = remaining_content + list(status_msgs.values())
-    remaining_items.sort(key=lambda x: x[0])
-
-    slots_available = max_size - len(kept)
-    if slots_available > 0:
-        kept.extend(remaining_items[-slots_available:])
-
-    # Sort by original index
-    kept.sort(key=lambda x: x[0])
-
-    compacted = [task for _, task in kept]
-    num_dropped = len(items) - len(compacted)
-
-    return compacted, num_dropped
-
-
-async def _check_and_compact_queue(
-    bot: Bot,
-    user_id: int,
-    queue: asyncio.Queue[MessageTask],
-) -> None:
-    """Check queue size and compact if necessary.
-
-    Called before enqueueing. If queue > MAX_QUEUE_SIZE:
-    1. Acquire lock (prevent worker from getting while we drain)
-    2. Drain queue
-    3. Compact (keep first + last N)
-    4. Enqueue warning message at front
-    5. Refill queue
-    6. Release lock
-    """
-    if not QUEUE_CHECK_ENABLED:
-        return
-
-    current_size = queue.qsize()
-    if current_size <= MAX_QUEUE_SIZE:
-        return
-
-    logger.warning(
-        f"Queue overflow for user {user_id}: "
-        f"{current_size} messages (max {MAX_QUEUE_SIZE})"
-    )
-
-    # Acquire lock to prevent worker interference during drain/refill
-    lock = _queue_locks.get(user_id)
-    if not lock:
-        logger.error(f"No lock found for user {user_id}, skipping compact")
-        return
-
-    async with lock:
-        # Drain and compact
-        items = _inspect_queue(queue)
-        compacted, num_dropped = _compact_queue(items, MAX_QUEUE_SIZE)
-
-        # Refill queue with warning first, then compacted items
-        if num_dropped > 0:
-            warning_text = (
-                f"⚠️ 消息量过多，已丢弃 {num_dropped} 条中间消息\n\n"
-                f"（保留了最新的 {len(compacted)} 条消息）"
-            )
-            warning_task = MessageTask(
-                task_type="content",
-                text=warning_text,
-                window_name=None,
-                parts=[convert_markdown(warning_text)],
-                is_complete=True,
-            )
-            # Insert warning at front
-            queue.put_nowait(warning_task)
-
-        # Refill compacted items
-        for item in compacted:
-            queue.put_nowait(item)
 
 
 def _can_merge_tasks(base: MessageTask, candidate: MessageTask) -> bool:
@@ -1406,9 +1287,6 @@ async def _enqueue_status_update(bot: Bot, user_id: int, window_name: str, statu
     """Enqueue status update."""
     queue = _get_or_create_queue(bot, user_id)
 
-    # Check queue size and compact if needed
-    await _check_and_compact_queue(bot, user_id, queue)
-
     if status_text:
         task = MessageTask(
             task_type="status_update",
@@ -1453,9 +1331,6 @@ async def _enqueue_content_message(
 ) -> None:
     """Enqueue a content message task."""
     queue = _get_or_create_queue(bot, user_id)
-
-    # Check queue size and compact if needed (async call with lock)
-    await _check_and_compact_queue(bot, user_id, queue)
 
     task = MessageTask(
         task_type="content",

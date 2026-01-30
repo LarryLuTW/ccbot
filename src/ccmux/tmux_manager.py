@@ -85,9 +85,9 @@ class TmuxManager:
                 return windows
 
             for window in session.windows:
-                # Only include windows with the Claude session prefix
                 name = window.window_name or ""
-                if not name.startswith(config.tmux_window_prefix):
+                # Skip the main window (placeholder window)
+                if name == config.tmux_main_window_name:
                     continue
                 try:
                     # Get the active pane's current path
@@ -257,13 +257,8 @@ class TmuxManager:
         if not path.is_dir():
             return False, f"Not a directory: {work_dir}", ""
 
-        # Create window name with prefix, adding suffix if name already exists
-        if not window_name:
-            final_window_name = f"{config.tmux_window_prefix}{path.name}"
-        elif not window_name.startswith(config.tmux_window_prefix):
-            final_window_name = f"{config.tmux_window_prefix}{window_name}"
-        else:
-            final_window_name = window_name
+        # Create window name, adding suffix if name already exists
+        final_window_name = window_name if window_name else path.name
 
         # Check for existing window name
         base_name = final_window_name

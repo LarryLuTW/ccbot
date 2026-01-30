@@ -148,7 +148,12 @@ class SessionManager:
                 self.user_window_offsets = {}
 
     async def load_session_map(self) -> None:
-        """Read session_map.json and update window_states with new session associations."""
+        """Read session_map.json and update window_states with new session associations.
+
+        Keys in session_map are formatted as "tmux_session:window_name".
+        Only entries matching our tmux_session_name are processed.
+        Also cleans up window_states entries not in current session_map.
+        """
         if not config.session_map_file.exists():
             return
         try:
@@ -158,8 +163,16 @@ class SessionManager:
         except (json.JSONDecodeError, OSError):
             return
 
+        prefix = f"{config.tmux_session_name}:"
+        valid_windows: set[str] = set()
         changed = False
-        for window_name, info in session_map.items():
+
+        for key, info in session_map.items():
+            # Only process entries for our tmux session
+            if not key.startswith(prefix):
+                continue
+            window_name = key[len(prefix):]
+            valid_windows.add(window_name)
             new_sid = info.get("session_id", "")
             new_cwd = info.get("cwd", "")
             if not new_sid:
@@ -173,6 +186,13 @@ class SessionManager:
                 state.session_id = new_sid
                 state.cwd = new_cwd
                 changed = True
+
+        # Clean up window_states entries not in current session_map
+        stale_windows = [w for w in self.window_states if w and w not in valid_windows]
+        for window_name in stale_windows:
+            logger.info(f"Removing stale window_state: {window_name}")
+            del self.window_states[window_name]
+            changed = True
 
         if changed:
             self._save_state()
@@ -269,15 +289,21 @@ class SessionManager:
     async def list_active_sessions(self) -> list[tuple[TmuxWindow, ClaudeSession | None]]:
         """List active tmux windows paired with their resolved sessions.
 
-        Returns a list of (TmuxWindow, ClaudeSession | None) for each ccmux window.
+        Returns a list of (TmuxWindow, ClaudeSession | None) for windows
+        that have been registered via hook (present in window_states with session_id).
         Multiple windows for the same directory are all included.
         """
         windows = await tmux_manager.list_windows()
+        # Filter to only windows that have been registered (have session_id in window_states)
+        registered_windows = [
+            w for w in windows
+            if w.window_name in self.window_states and self.window_states[w.window_name].session_id
+        ]
         # Resolve all sessions in parallel
         sessions = await asyncio.gather(
-            *[self.resolve_session_for_window(w.window_name) for w in windows]
+            *[self.resolve_session_for_window(w.window_name) for w in registered_windows]
         )
-        return list(zip(windows, sessions))
+        return list(zip(registered_windows, sessions))
 
     # --- Window → Session resolution ---
 
