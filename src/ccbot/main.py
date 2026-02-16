@@ -1,9 +1,10 @@
 """Application entry point — CLI dispatcher and bot bootstrap.
 
-Handles three execution modes:
+Handles four execution modes:
   1. `ccbot hook` — delegates to hook.hook_main() for Claude Code hook processing.
   2. `ccbot new` — creates a new Claude Code tmux window and attaches.
-  3. Default — configures logging, initializes tmux session, and starts the
+  3. `ccbot attach` — attaches to an existing Claude Code tmux window.
+  4. Default — configures logging, initializes tmux session, and starts the
      Telegram bot polling loop via bot.create_bot().
 """
 
@@ -23,6 +24,12 @@ def main() -> None:
         from .new_session import new_session_main
 
         new_session_main()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "attach":
+        from .attach_session import attach_session_main
+
+        attach_session_main()
         return
 
     logging.basicConfig(
