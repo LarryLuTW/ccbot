@@ -12,6 +12,7 @@ import os
 import sys
 
 import libtmux
+from simple_term_menu import TerminalMenu
 
 from .utils import ccbot_dir
 
@@ -67,35 +68,22 @@ def attach_session_main() -> None:
         _attach(wid)
         return
 
-    # Show numbered list
-    print("Available windows:")
-    for i, w in enumerate(windows, 1):
+    # Build menu entries
+    entries: list[str] = []
+    for w in windows:
         wid = w.window_id or ""
         name = w.window_name or ""
-        # Look up cwd from session_map
         map_key = f"{_SESSION_NAME}:{wid}"
         cwd = session_map.get(map_key, {}).get("cwd", "")
-        tag = "  [T]" if wid in bound_ids else ""
-        print(f"  {i}. {name}\t({wid})  {cwd}{tag}")
+        tag = " [T]" if wid in bound_ids else ""
+        entries.append(f"{name}   ({wid})  {cwd}{tag}")
 
-    # Prompt
-    try:
-        raw = input(f"Select [1-{len(windows)}]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
+    menu = TerminalMenu(entries, title="Available windows:")
+    idx = menu.show()
+    if idx is None:
         sys.exit(0)
 
-    try:
-        choice = int(raw)
-    except ValueError:
-        print("Invalid selection.", file=sys.stderr)
-        sys.exit(1)
-
-    if choice < 1 or choice > len(windows):
-        print("Invalid selection.", file=sys.stderr)
-        sys.exit(1)
-
-    window = windows[choice - 1]
+    window = windows[idx]  # type: ignore[index]
     wid = window.window_id or ""
     _attach(wid)
 
