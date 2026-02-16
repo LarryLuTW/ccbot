@@ -18,18 +18,16 @@ from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .callback_data import (
-    CB_DIR_CANCEL,
     CB_DIR_CONFIRM,
     CB_DIR_PAGE,
     CB_DIR_SELECT,
     CB_DIR_UP,
     CB_WIN_BIND,
-    CB_WIN_CANCEL,
     CB_WIN_NEW,
 )
 
 # Directories per page in directory browser
-DIRS_PER_PAGE = 6
+DIRS_PER_PAGE = 12
 
 # User state keys
 STATE_KEY = "state"
@@ -94,7 +92,6 @@ def build_window_picker(
     buttons.append(
         [
             InlineKeyboardButton("➕ New Session", callback_data=CB_WIN_NEW),
-            InlineKeyboardButton("Cancel", callback_data=CB_WIN_CANCEL),
         ]
     )
 
@@ -114,13 +111,7 @@ def build_directory_browser(
         path = Path.cwd()
 
     try:
-        subdirs = sorted(
-            [
-                d.name
-                for d in path.iterdir()
-                if d.is_dir()
-            ]
-        )
+        subdirs = sorted([d.name for d in path.iterdir() if d.is_dir()])
     except (PermissionError, OSError):
         subdirs = []
 
@@ -163,7 +154,6 @@ def build_directory_browser(
     if path != path.parent:
         action_row.append(InlineKeyboardButton("..", callback_data=CB_DIR_UP))
     action_row.append(InlineKeyboardButton("Select", callback_data=CB_DIR_CONFIRM))
-    action_row.append(InlineKeyboardButton("Cancel", callback_data=CB_DIR_CANCEL))
     buttons.append(action_row)
 
     display_path = str(path).replace(str(Path.home()), "~")

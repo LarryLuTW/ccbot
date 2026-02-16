@@ -62,7 +62,6 @@ from .handlers.callback_data import (
     CB_ASK_SPACE,
     CB_ASK_TAB,
     CB_ASK_UP,
-    CB_DIR_CANCEL,
     CB_DIR_CONFIRM,
     CB_DIR_PAGE,
     CB_DIR_SELECT,
@@ -72,7 +71,6 @@ from .handlers.callback_data import (
     CB_KEYS_PREFIX,
     CB_SCREENSHOT_REFRESH,
     CB_WIN_BIND,
-    CB_WIN_CANCEL,
     CB_WIN_NEW,
 )
 from .handlers.directory_browser import (
@@ -526,7 +524,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if pending_tid == thread_id:
             await safe_reply(
                 update.message,
-                "Please use the window picker above, or tap Cancel.",
+                "Please use the window picker above.",
             )
             return
         # Stale picker state from a different thread — clear it
@@ -542,7 +540,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if pending_tid == thread_id:
             await safe_reply(
                 update.message,
-                "Please use the directory browser above, or tap Cancel.",
+                "Please use the directory browser above.",
             )
             return
         # Stale browsing state from a different thread — clear it
@@ -889,19 +887,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 context.user_data.pop("_pending_thread_id", None)
         await query.answer("Created" if success else "Failed")
 
-    elif data == CB_DIR_CANCEL:
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
-        if pending_tid is not None and _get_thread_id(update) != pending_tid:
-            await query.answer("Stale browser (topic mismatch)", show_alert=True)
-            return
-        clear_browse_state(context.user_data)
-        if context.user_data is not None:
-            context.user_data.pop("_pending_thread_id", None)
-        await safe_edit(query, "Cancelled")
-        await query.answer("Cancelled")
-
     # Window picker: bind existing window
     elif data.startswith(CB_WIN_BIND):
         pending_tid = (
@@ -980,20 +965,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             context.user_data[BROWSE_DIRS_KEY] = subdirs
         await safe_edit(query, msg_text, reply_markup=keyboard)
         await query.answer()
-
-    # Window picker: cancel
-    elif data == CB_WIN_CANCEL:
-        pending_tid = (
-            context.user_data.get("_pending_thread_id") if context.user_data else None
-        )
-        if pending_tid is not None and _get_thread_id(update) != pending_tid:
-            await query.answer("Stale picker (topic mismatch)", show_alert=True)
-            return
-        clear_window_picker_state(context.user_data)
-        if context.user_data is not None:
-            context.user_data.pop("_pending_thread_id", None)
-        await safe_edit(query, "Cancelled")
-        await query.answer("Cancelled")
 
     # Screenshot: Refresh
     elif data.startswith(CB_SCREENSHOT_REFRESH):
