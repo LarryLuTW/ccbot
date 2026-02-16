@@ -118,7 +118,7 @@ def build_directory_browser(
             [
                 d.name
                 for d in path.iterdir()
-                if d.is_dir() and not d.name.startswith(".")
+                if d.is_dir()
             ]
         )
     except (PermissionError, OSError):
