@@ -55,7 +55,7 @@ pipx install git+https://github.com/six-ddc/ccmux.git
 ```bash
 git clone https://github.com/six-ddc/ccmux.git
 cd ccmux
-uv sync
+uv tool install -e .
 ```
 
 ## Configuration
@@ -148,6 +148,15 @@ uv run ccbot
 | `/screenshot` | Capture terminal screenshot     |
 | `/esc`        | Send Escape to interrupt Claude |
 
+**CLI commands:**
+
+| Command                  | Description                                   |
+| ------------------------ | --------------------------------------------- |
+| `ccbot`                  | Start the Telegram bot                        |
+| `ccbot new [dir]`        | Create a tmux window, start claude, and attach |
+| `ccbot hook`             | Process SessionStart hook from stdin           |
+| `ccbot hook --install`   | Install the hook into ~/.claude/settings.json  |
+
 **Claude Code commands (forwarded via tmux):**
 
 | Command    | Description                  |
@@ -216,7 +225,17 @@ Notifications are delivered to the topic bound to the session's window.
 2. Send any message
 3. Select the project directory from the browser
 
-### Option 2: Create Manually
+### Option 2: `ccbot new` (Desktop)
+
+Start a session from your terminal that you can later bind to a Telegram topic:
+
+```bash
+ccbot new ~/Code/myproject           # Create window, start claude, and attach
+ccbot new -n refactor ~/Code/myproject  # Custom window name
+ccbot new --no-attach .              # Create without attaching
+```
+
+### Option 3: Create Manually
 
 ```bash
 tmux attach -t ccbot
@@ -241,8 +260,9 @@ The window must be in the `ccbot` tmux session (configurable via `TMUX_SESSION_N
 ```
 src/ccbot/
 ├── __init__.py            # Package entry point
-├── main.py                # CLI dispatcher (hook subcommand + bot bootstrap)
+├── main.py                # CLI dispatcher (hook/new subcommands + bot bootstrap)
 ├── hook.py                # Hook subcommand for session tracking (+ --install)
+├── new_session.py         # New session subcommand (create window + attach)
 ├── config.py              # Configuration from environment variables
 ├── bot.py                 # Telegram bot setup, command handlers, topic routing
 ├── session.py             # Session management, state persistence, message history
