@@ -20,13 +20,11 @@ CB_HISTORY_NEXT = "hn:"  # history page newer
 CB_DIR_SELECT = "db:sel:"
 CB_DIR_UP = "db:up"
 CB_DIR_CONFIRM = "db:confirm"
-CB_DIR_CANCEL = "db:cancel"
 CB_DIR_PAGE = "db:page:"
 
 # Window picker (bind existing unbound window)
 CB_WIN_BIND = "wb:sel:"  # wb:sel:<index>
 CB_WIN_NEW = "wb:new"  # proceed to directory browser
-CB_WIN_CANCEL = "wb:cancel"
 
 # Screenshot
 CB_SCREENSHOT_REFRESH = "ss:ref:"
