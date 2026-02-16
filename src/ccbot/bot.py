@@ -110,7 +110,6 @@ from .handlers.message_sender import (
     rate_limit_send_message,
     safe_edit,
     safe_reply,
-    safe_send,
 )
 from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts
@@ -533,7 +532,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Stale picker state from a different thread — clear it
         clear_window_picker_state(context.user_data)
         context.user_data.pop("_pending_thread_id", None)
-        context.user_data.pop("_pending_thread_text", None)
 
     # Ignore text in directory browsing mode (only for the same thread)
     if (
@@ -550,7 +548,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # Stale browsing state from a different thread — clear it
         clear_browse_state(context.user_data)
         context.user_data.pop("_pending_thread_id", None)
-        context.user_data.pop("_pending_thread_text", None)
 
     # Must be in a named topic
     if thread_id is None:
@@ -590,7 +587,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 context.user_data[STATE_KEY] = STATE_SELECTING_WINDOW
                 context.user_data[UNBOUND_WINDOWS_KEY] = win_ids
                 context.user_data["_pending_thread_id"] = thread_id
-                context.user_data["_pending_thread_text"] = text
             await safe_reply(update.message, msg_text, reply_markup=keyboard)
             return
 
@@ -608,7 +604,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             context.user_data[BROWSE_PAGE_KEY] = 0
             context.user_data[BROWSE_DIRS_KEY] = subdirs
             context.user_data["_pending_thread_id"] = thread_id
-            context.user_data["_pending_thread_text"] = text
         await safe_reply(update.message, msg_text, reply_markup=keyboard)
         return
 
@@ -840,7 +835,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             clear_browse_state(context.user_data)
             if context.user_data is not None:
                 context.user_data.pop("_pending_thread_id", None)
-                context.user_data.pop("_pending_thread_text", None)
             await query.answer("Stale browser (topic mismatch)", show_alert=True)
             return
 
@@ -884,34 +878,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     f"✅ {message}\n\nBound to this topic. Send messages here.",
                 )
 
-                # Send pending text if any
-                pending_text = (
-                    context.user_data.get("_pending_thread_text")
-                    if context.user_data
-                    else None
-                )
-                if pending_text:
-                    logger.debug(
-                        "Forwarding pending text to window %s (len=%d)",
-                        created_wname,
-                        len(pending_text),
-                    )
-                    if context.user_data is not None:
-                        context.user_data.pop("_pending_thread_text", None)
-                        context.user_data.pop("_pending_thread_id", None)
-                    send_ok, send_msg = await session_manager.send_to_window(
-                        created_wid,
-                        pending_text,
-                    )
-                    if not send_ok:
-                        logger.warning("Failed to forward pending text: %s", send_msg)
-                        await safe_send(
-                            context.bot,
-                            session_manager.resolve_chat_id(user.id, pending_thread_id),
-                            f"❌ Failed to send pending message: {send_msg}",
-                            message_thread_id=pending_thread_id,
-                        )
-                elif context.user_data is not None:
+                if context.user_data is not None:
                     context.user_data.pop("_pending_thread_id", None)
             else:
                 # Should not happen in topic-only mode, but handle gracefully
@@ -920,7 +887,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await safe_edit(query, f"❌ {message}")
             if pending_thread_id is not None and context.user_data is not None:
                 context.user_data.pop("_pending_thread_id", None)
-                context.user_data.pop("_pending_thread_text", None)
         await query.answer("Created" if success else "Failed")
 
     elif data == CB_DIR_CANCEL:
@@ -933,7 +899,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         clear_browse_state(context.user_data)
         if context.user_data is not None:
             context.user_data.pop("_pending_thread_id", None)
-            context.user_data.pop("_pending_thread_text", None)
         await safe_edit(query, "Cancelled")
         await query.answer("Cancelled")
 
@@ -992,25 +957,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"✅ Bound to window `{display}`",
         )
 
-        # Forward pending text if any
-        pending_text = (
-            context.user_data.get("_pending_thread_text") if context.user_data else None
-        )
         if context.user_data is not None:
-            context.user_data.pop("_pending_thread_text", None)
             context.user_data.pop("_pending_thread_id", None)
-        if pending_text:
-            send_ok, send_msg = await session_manager.send_to_window(
-                selected_wid, pending_text
-            )
-            if not send_ok:
-                logger.warning("Failed to forward pending text: %s", send_msg)
-                await safe_send(
-                    context.bot,
-                    session_manager.resolve_chat_id(user.id, thread_id),
-                    f"❌ Failed to send pending message: {send_msg}",
-                    message_thread_id=thread_id,
-                )
         await query.answer("Bound")
 
     # Window picker: new session → transition to directory browser
@@ -1044,7 +992,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         clear_window_picker_state(context.user_data)
         if context.user_data is not None:
             context.user_data.pop("_pending_thread_id", None)
-            context.user_data.pop("_pending_thread_text", None)
         await safe_edit(query, "Cancelled")
         await query.answer("Cancelled")
 

@@ -130,6 +130,11 @@ ccbot
 
 # If installed from source
 uv run ccbot
+
+# Run from a local clone (for development)
+cd /path/to/ccmux
+uv sync
+uv run ccbot
 ```
 
 ### Commands
@@ -162,9 +167,9 @@ Any unrecognized `/command` is also forwarded to Claude Code as-is (e.g. `/revie
 **Creating a new session:**
 
 1. Create a new topic in the Telegram group
-2. Send any message in the topic
+2. Send any message in the topic to trigger setup
 3. A directory browser appears — select the project directory
-4. A tmux window is created, `claude` starts, and your pending message is forwarded
+4. A tmux window is created and `claude` starts — type your first prompt
 
 **Sending messages:**
 
