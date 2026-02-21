@@ -112,7 +112,6 @@ from .handlers.message_sender import (
     NO_LINK_PREVIEW,
     safe_edit,
     safe_reply,
-    safe_send,
     send_with_fallback,
 )
 from .markdown_v2 import convert_markdown
