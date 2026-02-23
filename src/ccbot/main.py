@@ -1,14 +1,18 @@
 """Application entry point — CLI dispatcher and bot bootstrap.
 
-Handles four execution modes:
+Handles five execution modes:
   1. `ccbot hook` — delegates to hook.hook_main() for Claude Code hook processing.
   2. `ccbot new` — creates a new Claude Code tmux window and attaches.
   3. `ccbot attach` — attaches to an existing Claude Code tmux window.
-  4. Default — configures logging, initializes tmux session, and starts the
+  4. `ccbot stop` — sends SIGTERM to a running bot instance via lockfile PID.
+  5. Default — configures logging, initializes tmux session, and starts the
      Telegram bot polling loop via bot.create_bot().
 """
 
+import fcntl
 import logging
+import os
+import signal
 import sys
 
 
@@ -30,6 +34,22 @@ def main() -> None:
         from .attach_session import attach_session_main
 
         attach_session_main()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "stop":
+        from .utils import ccbot_dir
+
+        lock_path = ccbot_dir() / ".bot.lock"
+        if not lock_path.exists():
+            print("No lockfile found — ccbot is not running", file=sys.stderr)
+            sys.exit(1)
+        try:
+            pid = int(lock_path.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            print(f"Sent SIGTERM to ccbot (PID {pid})")
+        except (ValueError, ProcessLookupError):
+            print("ccbot is not running (stale lockfile)", file=sys.stderr)
+            sys.exit(1)
         return
 
     logging.basicConfig(
@@ -58,6 +78,18 @@ def main() -> None:
     # AIORateLimiter (max_retries=5) handles retries itself; keep INFO for visibility
     logging.getLogger("telegram.ext.AIORateLimiter").setLevel(logging.INFO)
     logger = logging.getLogger(__name__)
+
+    # Singleton lock — only one bot instance at a time.
+    # lock_file must stay open for the process lifetime (flock released on close/exit).
+    lock_path = config.config_dir / ".bot.lock"
+    lock_file = lock_path.open("w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("Another ccbot instance is already running", file=sys.stderr)
+        sys.exit(1)
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
 
     from .tmux_manager import tmux_manager
 

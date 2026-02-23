@@ -7,6 +7,9 @@ TARGET="${TMUX_SESSION}:${TMUX_WINDOW}"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MAX_WAIT=10  # seconds to wait for process to exit
 
+CCBOT_DIR="${CCBOT_DIR:-$HOME/.ccbot}"
+LOCK_FILE="${CCBOT_DIR}/.bot.lock"
+
 # Check if tmux session and window exist
 if ! tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     echo "Error: tmux session '$TMUX_SESSION' does not exist"
@@ -18,44 +21,33 @@ if ! tmux list-windows -t "$TMUX_SESSION" -F '#{window_name}' 2>/dev/null | grep
     exit 1
 fi
 
-# Get the pane PID and check if uv run ccbot is running
-PANE_PID=$(tmux list-panes -t "$TARGET" -F '#{pane_pid}')
+# Stop existing process if running (via lockfile PID)
+if [ -f "$LOCK_FILE" ]; then
+    PID=$(cat "$LOCK_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        echo "Found running ccbot process (PID $PID), sending SIGTERM..."
+        kill "$PID" 2>/dev/null || true
 
-is_ccbot_running() {
-    pstree -a "$PANE_PID" 2>/dev/null | grep -q 'uv.*run ccbot\|ccbot.*\.venv/bin/ccbot'
-}
+        # Wait for process to exit
+        waited=0
+        while kill -0 "$PID" 2>/dev/null && [ "$waited" -lt "$MAX_WAIT" ]; do
+            sleep 1
+            waited=$((waited + 1))
+            echo "  Waiting for process to exit... (${waited}s/${MAX_WAIT}s)"
+        done
 
-# Stop existing process if running
-if is_ccbot_running; then
-    echo "Found running ccbot process, sending Ctrl-C..."
-    tmux send-keys -t "$TARGET" C-c
-
-    # Wait for process to exit
-    waited=0
-    while is_ccbot_running && [ "$waited" -lt "$MAX_WAIT" ]; do
-        sleep 1
-        waited=$((waited + 1))
-        echo "  Waiting for process to exit... (${waited}s/${MAX_WAIT}s)"
-    done
-
-    if is_ccbot_running; then
-        echo "Process did not exit after ${MAX_WAIT}s, sending SIGTERM..."
-        # Kill the uv process directly
-        UV_PID=$(pstree -ap "$PANE_PID" 2>/dev/null | grep -oP 'uv,\K\d+' | head -1)
-        if [ -n "$UV_PID" ]; then
-            kill "$UV_PID" 2>/dev/null || true
-            sleep 2
-        fi
-        if is_ccbot_running; then
-            echo "Process still running, sending SIGKILL..."
-            kill -9 "$UV_PID" 2>/dev/null || true
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "Process did not exit after ${MAX_WAIT}s, sending SIGKILL..."
+            kill -9 "$PID" 2>/dev/null || true
             sleep 1
         fi
-    fi
 
-    echo "Process stopped."
+        echo "Process stopped."
+    else
+        echo "No running ccbot process (stale lockfile)"
+    fi
 else
-    echo "No ccbot process running in $TARGET"
+    echo "No ccbot lockfile found — assuming not running"
 fi
 
 # Brief pause to let the shell settle
@@ -65,15 +57,24 @@ sleep 1
 echo "Starting ccbot in $TARGET..."
 tmux send-keys -t "$TARGET" "cd ${PROJECT_DIR} && uv run ccbot" Enter
 
-# Verify startup and show logs
+# Verify startup by checking lockfile PID
 sleep 3
-if is_ccbot_running; then
-    echo "ccbot restarted successfully. Recent logs:"
-    echo "----------------------------------------"
-    tmux capture-pane -t "$TARGET" -p | tail -20
-    echo "----------------------------------------"
+if [ -f "$LOCK_FILE" ]; then
+    NEW_PID=$(cat "$LOCK_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$NEW_PID" ] && kill -0 "$NEW_PID" 2>/dev/null; then
+        echo "ccbot restarted successfully (PID $NEW_PID). Recent logs:"
+        echo "----------------------------------------"
+        tmux capture-pane -t "$TARGET" -p | tail -20
+        echo "----------------------------------------"
+    else
+        echo "Warning: ccbot may not have started. Pane output:"
+        echo "----------------------------------------"
+        tmux capture-pane -t "$TARGET" -p | tail -30
+        echo "----------------------------------------"
+        exit 1
+    fi
 else
-    echo "Warning: ccbot may not have started. Pane output:"
+    echo "Warning: lockfile not found after startup. Pane output:"
     echo "----------------------------------------"
     tmux capture-pane -t "$TARGET" -p | tail -30
     echo "----------------------------------------"
