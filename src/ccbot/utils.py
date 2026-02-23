@@ -4,10 +4,13 @@ Provides:
   - ccbot_dir(): resolve config directory from CCBOT_DIR env var.
   - atomic_write_json(): crash-safe JSON file writes via temp+rename.
   - read_cwd_from_jsonl(): extract the cwd field from the first JSONL entry.
+  - find_ccbot_path(): locate the ccbot executable.
 """
 
 import json
 import os
+import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -47,6 +50,29 @@ def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
         except OSError:
             pass
         raise
+
+
+def find_ccbot_path() -> str:
+    """Find the full path to the ccbot executable.
+
+    Priority:
+    1. shutil.which("ccbot") - if ccbot is in PATH
+    2. Same directory as the Python interpreter (for venv installs)
+    """
+    # Try PATH first
+    ccbot_path = shutil.which("ccbot")
+    if ccbot_path:
+        return ccbot_path
+
+    # Fall back to the directory containing the Python interpreter
+    # This handles the case where ccbot is installed in a venv
+    python_dir = Path(sys.executable).parent
+    ccbot_in_venv = python_dir / "ccbot"
+    if ccbot_in_venv.exists():
+        return str(ccbot_in_venv)
+
+    # Last resort: assume it will be in PATH
+    return "ccbot"
 
 
 def read_cwd_from_jsonl(file_path: str | Path) -> str:

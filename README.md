@@ -1,7 +1,5 @@
 # CCBot
 
-[中文文档](README_CN.md)
-
 Control Claude Code sessions remotely via Telegram — monitor, interact, and manage AI coding sessions running in tmux.
 
 https://github.com/user-attachments/assets/15ffb38e-5eb9-4720-93b9-412e4961dc93
@@ -126,16 +124,16 @@ This writes window-session mappings to `$CCBOT_DIR/session_map.json` (`~/.ccbot/
 ## Usage
 
 ```bash
-# If installed via uv tool / pipx
-ccbot
+# Start in foreground
+ccbot start
 
-# If installed from source
-uv run ccbot
+# Start in background (daemon mode)
+ccbot start -d
 
 # Run from a local clone (for development)
 cd /path/to/ccmux
 uv sync
-uv run ccbot
+uv run ccbot start
 ```
 
 ### Commands
@@ -153,8 +151,13 @@ uv run ccbot
 
 | Command                  | Description                                   |
 | ------------------------ | --------------------------------------------- |
-| `ccbot`                  | Start the Telegram bot                        |
+| `ccbot`                  | Show usage help                               |
+| `ccbot start`            | Start the Telegram bot (foreground)            |
+| `ccbot start -d`         | Start in background (daemon mode)              |
+| `ccbot stop`             | Stop a running bot instance                    |
+| `ccbot restart [-d]`     | Restart the bot (stop + start)                 |
 | `ccbot new [dir]`        | Create a tmux window, start claude, and attach |
+| `ccbot attach`           | Attach to an existing tmux window              |
 | `ccbot hook`             | Process SessionStart hook from stdin           |
 | `ccbot hook --install`   | Install the hook into ~/.claude/settings.json  |
 

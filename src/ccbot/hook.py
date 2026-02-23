@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,29 +30,6 @@ _CLAUDE_SETTINGS_FILE = Path.home() / ".claude" / "settings.json"
 
 # The hook command suffix for detection
 _HOOK_COMMAND_SUFFIX = "ccbot hook"
-
-
-def _find_ccbot_path() -> str:
-    """Find the full path to the ccbot executable.
-
-    Priority:
-    1. shutil.which("ccbot") - if ccbot is in PATH
-    2. Same directory as the Python interpreter (for venv installs)
-    """
-    # Try PATH first
-    ccbot_path = shutil.which("ccbot")
-    if ccbot_path:
-        return ccbot_path
-
-    # Fall back to the directory containing the Python interpreter
-    # This handles the case where ccbot is installed in a venv
-    python_dir = Path(sys.executable).parent
-    ccbot_in_venv = python_dir / "ccbot"
-    if ccbot_in_venv.exists():
-        return str(ccbot_in_venv)
-
-    # Last resort: assume it will be in PATH
-    return "ccbot"
 
 
 def _is_hook_installed(settings: dict) -> bool:
@@ -103,7 +79,9 @@ def _install_hook() -> int:
         return 0
 
     # Find the full path to ccbot
-    ccbot_path = _find_ccbot_path()
+    from .utils import find_ccbot_path
+
+    ccbot_path = find_ccbot_path()
     hook_command = f"{ccbot_path} hook"
     hook_config = {"type": "command", "command": hook_command, "timeout": 5}
     logger.info("Installing hook command: %s", hook_command)

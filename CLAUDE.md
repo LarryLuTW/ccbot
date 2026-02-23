@@ -10,7 +10,7 @@ Tech stack: Python, python-telegram-bot, tmux, uv.
 uv run ruff check src/ tests/         # Lint — MUST pass before committing
 uv run ruff format src/ tests/        # Format — auto-fix, then verify with --check
 uv run pyright src/ccbot/             # Type check — MUST be 0 errors before committing
-./scripts/restart.sh                  # Restart the ccbot service after code changes
+ccbot restart -d                      # Restart the ccbot service after code changes
 ccbot hook --install                  # Auto-install Claude Code SessionStart hook
 ```
 
