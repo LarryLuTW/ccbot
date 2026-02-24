@@ -9,7 +9,9 @@ since it runs as a standalone CLI command. Config values are read from env vars.
 
 import argparse
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import libtmux
@@ -107,5 +109,12 @@ def new_session_main() -> None:
         # Already inside tmux — switch to the new window
         os.execvp("tmux", ["tmux", "switch-client", "-t", target])
     else:
-        # Outside tmux — attach to the session at the new window
-        os.execvp("tmux", ["tmux", "attach-session", "-t", target])
+        # Outside tmux — create a grouped session (independent current-window)
+        # and select the chosen window. Session auto-destroys on detach.
+        suffix = f"{window_id.lstrip('@')}-{int(time.time()) % 10000}"
+        session_name = f"{_SESSION_NAME}-{suffix}"
+        os.execvp("tmux", [
+            "tmux", "new-session", "-t", _SESSION_NAME,
+            "-s", session_name,
+            ";", "select-window", "-t", window_id,
+        ])

@@ -9,7 +9,9 @@ since it runs as a standalone CLI command. Config values are read from env vars.
 
 import json
 import os
+import subprocess
 import sys
+import time
 
 import libtmux
 from simple_term_menu import TerminalMenu
@@ -89,9 +91,18 @@ def attach_session_main() -> None:
 
 
 def _attach(window_id: str) -> None:
-    """Attach or switch to the given window."""
+    """Attach or switch to the given window via a grouped session."""
     target = f"{_SESSION_NAME}:{window_id}"
     if os.environ.get("TMUX"):
+        # Already inside tmux — switch to the window
         os.execvp("tmux", ["tmux", "switch-client", "-t", target])
     else:
-        os.execvp("tmux", ["tmux", "attach-session", "-t", target])
+        # Outside tmux — create a grouped session (independent current-window)
+        # and select the chosen window. Session auto-destroys on detach.
+        suffix = f"{window_id.lstrip('@')}-{int(time.time()) % 10000}"
+        session_name = f"{_SESSION_NAME}-{suffix}"
+        os.execvp("tmux", [
+            "tmux", "new-session", "-t", _SESSION_NAME,
+            "-s", session_name,
+            ";", "select-window", "-t", window_id,
+        ])
